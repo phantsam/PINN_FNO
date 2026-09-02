@@ -27,3 +27,11 @@ ML/pinn-vs-pikan/
 Thumbs.db
 .vscode/
 .idea/
+
+# pykan auto-save checkpoint dir
+model/
+_pykan_ckpt*/
+
+# local copy of the `rak` branch's artifacts (57MB: results, gifs, checkpoints);
+# that branch already exists on the remote
+rak_branch/
