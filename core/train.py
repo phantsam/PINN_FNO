@@ -93,7 +93,7 @@ def train_lbfgs(arch_fn, material: Material, *, ansatz_kind="legacy", epochs=700
                 use_bc=True, patience=50, min_delta=1e-9, device=None,
                 x_ref=None, t_ref=None, u_ref=None, save_path=None, log=None,
                 normalise=False, sobol=True, use_r3=False, r3_frac=0.5,
-                grid_updates=0):
+                grid_updates=0, grid_update_frac=0.5):
     """L-BFGS on a FIXED collocation set -- the recipe the rak branch uses.
 
     Critical detail: the collocation points are sampled ONCE and reused for every
@@ -156,8 +156,15 @@ def train_lbfgs(arch_fn, material: Material, *, ansatz_kind="legacy", epochs=700
     # activations -- see TunedKAN.update_grid_ for the measured consequence.
     # Mirroring that schedule here; 0 keeps the previous behaviour exactly.
     if grid_updates and hasattr(model, "update_grid_"):
-        half = max(1, epochs // 2)
-        grid_eps_at = {int(i * half / grid_updates) for i in range(grid_updates)}
+        # `epochs` is the CAP, not the convergence point.  charcoords50 converges
+        # in ~300 of a 3000 cap, so pykan's own schedule (10 updates over the
+        # first half = every 150 epochs) would fire only ~2 times, while a naive
+        # schedule keyed to actual runtime fires every ~3 epochs and destroys the
+        # optimiser (measured: 0.606% -> 7.685% at a 60-epoch budget).
+        # grid_update_frac keys the schedule to the expected convergence
+        # timescale instead of the cap.
+        span = max(1, int(epochs * grid_update_frac))
+        grid_eps_at = {int(i * span / grid_updates) for i in range(grid_updates)}
     else:
         grid_eps_at = set()
 
@@ -229,7 +236,8 @@ def train_lbfgs(arch_fn, material: Material, *, ansatz_kind="legacy", epochs=700
     final["norm_ratio"] = [float(v) for v in final["norm_ratio"]]
     final.update(wall_s=wall, epochs_run=ep + 1, best_loss=best, optimizer="lbfgs",
                  normalised=normalise, sobol=sobol, r3=use_r3, r3_retained=n_retained,
-                 diverged=diverged, grid_updates=grid_updates)
+                 diverged=diverged, grid_updates=grid_updates,
+                 grid_update_frac=grid_update_frac)
     if save_path:
         torch.save({"state_dict": model.state_dict(),
                     "metrics": {k: v for k, v in final.items() if k != "norm_ratio"}}, save_path)

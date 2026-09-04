@@ -996,7 +996,7 @@ material.** Three such findings collapsed within one hour of multi-seed checking
 
 ## 16. Results
 
-### 16.1 Phase 6 + 7, mean rel-L2 % over 3 seeds
+### 16.1 Phase 6 + 7 -- untuned architectures, mean rel-L2 % over 3 seeds
 
 | arch | params | homog plain | homog R3 | two plain | two R3 | multi plain | multi R3 |
 |---|---|---|---|---|---|---|---|
@@ -1008,69 +1008,205 @@ material.** Three such findings collapsed within one hour of multi-seed checking
 
 \* one or more seeds collapsed.
 
-### 16.2 Verdict
+At this stage the PINN leads on every material by 1.7-2.0x.  That result is a
+property of the UNTUNED KAN and does not survive Phase 8.
+
+### 16.2 Final -- best PINN vs best tuned KAN
 
 | material | best PINN | best KAN | ratio |
 |---|---|---|---|
-| homogeneous | **0.111** | 0.189 | **1.70×** |
-| twolayer | **0.394** | 0.662 | **1.68×** |
-| multilayer | **0.162** | 0.328 | **2.03×** |
+| homogeneous | 0.1114 ±0.0006 (PirateNet, 199,811p) | **0.1115 ±0.0026** (charcoords50, 49,020p) | **1.001x** |
+| multilayer | 0.1617 ±0.0037 (Fourier, 82,689p) | **0.1627 ±0.0023** (charcoords50, 49,020p) | **1.006x** |
+| twolayer | 0.3944 (Fourier+R3) | 0.5563 (tanh, 1 seed, capped) | 1.41x |
 
-With the tuned ladder configurations, homogeneous narrows to ~**1.35×**
-(grid20 0.1510 / sin 0.1521 / k5 0.1590 — three independent rungs clustering).
+Both ties are 3-seed, converged, and reproducible.  On multilayer the KAN also
+BEATS PirateNet (0.1627 vs 0.1671, 0.974x).
 
-**No 3-seed comparison anywhere in this study has a KAN ahead of the best PINN.**
+`charcoords50` = characteristic coordinates + grid=50 + k=5, at **49,020
+parameters** -- 4.1x fewer than PirateNet, 1.7x fewer than the Fourier PINN.
 
-### 16.3 Reliability, not just accuracy
+### 16.3 Reliability
 
 | arch | homogeneous sd / mean |
 |---|---|
-| PirateNet | **0.6 %** |
+| PirateNet | 0.6 % |
+| **charcoords50 (KAN)** | **2.3 %** |
 | Fourier | 1.5 % |
-| pykan | **13.5 %** |
+| pykan, untuned | 13.5 % |
 | MLP | 30.5 % |
 
-pykan's seed variance is **16× the Fourier PINN's**. Any architecture gap smaller
-than ~14 % is inside the KAN's own noise.
+On multilayer `charcoords50`'s spread is **1.4 %**, tighter than Fourier's own
+2.3 %.  The claim "KANs are less reliable" was a property of the untuned
+configuration, not the architecture.
 
-## 17. Conclusion
+## 17. The winning KAN vs the losing KAN, layer by layer
+
+Both are pykan.  Same library, same trainer, same ansatz, same metric, same
+evaluation batch.  Baseline: grid=5 on raw (x,t), 0.2272 %.  Winner:
+characteristic coordinates + grid=50 + k=5, 0.1089 %.  Measured with
+`core/forensics3.py`.
+
+### 17.1 The input carries ZERO extra information
+
+| | baseline (x,t) | winner (xi,eta) |
+|---|---|---|
+| singular values | 58.54, 29.18 | 55.19, 27.51 |
+| effective rank | 1.80 | **1.80** |
+| linear probe | 99.884 % | **99.884 %** |
+| hi-k share | 0.135 | **0.135** |
+
+Identical to the digit.  On homogeneous `tau(x) = x/c`, so `(xi,eta) = (x-t, x+t)`
+is a pure rotation and `span{xi,eta,1} = span{x,t,1}` -- no linear readout can
+tell them apart.  **The winner is handed nothing the baseline did not have.**
+
+### 17.2 The win is not dimensionality either
+
+| layer | baseline rank | winner rank | baseline probe | winner probe |
+|---|---|---|---|---|
+| acts1 | 2.75 | 2.75 | 99.223 % | **27.701 %** |
+| acts2 | 4.41 | 4.59 | 64.092 % | **18.288 %** |
+| acts3 | 4.72 | **5.10** | 26.419 % | **6.990 %** |
+
+Effective rank moves 8 %.  The linear probe improves **3.5-3.8x at every depth**.
+Same number of directions; far better ones.
+
+### 17.3 The mechanism -- high-frequency content reverses direction
+
+| layer | baseline hi-k | winner hi-k |
+|---|---|---|
+| input | 0.135 | 0.135 |
+| acts1 | 0.091 (down) | 0.143 (up) |
+| acts2 | 0.076 (down) | 0.155 (up) |
+| acts3 | 0.106 | **0.262** (up) |
+
+**The losing KAN destroys high-frequency content with depth; the winner builds
+it.**  0.262 exceeds even the Fourier PINN's embedding at 0.191 -- the winner
+manufactures more high-frequency structure than the PINN is handed for free.
+This is the same quantity (0.076) identified in section 7 as the reason the KAN
+could not represent a travelling pulse.
+
+### 17.4 What enables it
+
+| layer | baseline knots in active range | winner knots in active range |
+|---|---|---|
+| acts1 | 12.7 (and OVERFLOWING its grid at 116 %) | **27.1** |
+| acts2 | 6.0 | **12.8** |
+| acts3 | 3.4 | **4.9** |
+
+Grid overflow eliminated (116 % -> 45 %), ~2x more knots across each active
+range, and near-linear edges fall from 7.5-20 % to **0-5 %** -- nearly every edge
+now does nonlinear work.
+
+### 17.5 The statement
+
+> The rotation adds no information; it ALIGNS the wave's structure with the
+> KAN's input axes, so that `u = F(xi) + G(eta)` -- a sum of univariate functions,
+> which is exactly what a Kolmogorov-Arnold network is -- becomes reachable.  The
+> fine grid then supplies the resolution to represent those functions.  Neither
+> alone suffices: grid50 without the rotation COLLAPSES at 66.68 %, and the
+> rotation at grid20 reaches only 0.1498.
+
+This also explains twolayer's failure (1.66 %) without appeal to interface
+counts: there `tau` is nonlinear and the reflected wave adds a third family, so
+no two coordinates make the solution separable.
+
+## 18. Phase 9 -- can the last measured defect be fixed?
+
+The winner's trace still showed one large defect: `acts3` reaches **8 % of its
+grid**, so 92 % of the deepest layer's spline coefficients are never touched.
+Refitting each grid to its observed range would give ~61 knots there instead of
+4.9 -- a **12x** resolution gain, concentrated exactly where the model has least.
+
+`update_grid` is pykan's own remedy (its `fit()` defaults to 10 updates over the
+first half of training) and our L-BFGS loop never called it.  It was also the
+same CLASS of fix as the two largest gains in the study: the grid_range
+correction (+22 %, zero cost) and grid 5 -> 20.
+
+**Result: it fails, at every schedule tested.**
+
+| arm | refit interval | seeds | rel-L2 |
+|---|---|---|---|
+| **control** | -- | 3/3 | **0.1091, 0.1140, 0.1116** -> 0.1116 ±0.0025 |
+| 6 updates @ 0.10 | ~50 ep | 3/3 | 95.00, 95.37, 95.11 -- all collapse |
+| 3 updates @ 0.10 | ~100 ep | 3/3 | 94.93, 95.36, 95.06 -- all collapse |
+| 3 updates @ 0.25 | ~250 ep | 2/3 | 95.01, 95.37 -- all collapse |
+
+**8 of 8 update runs collapsed; 3 of 3 controls clean.**  Every collapse lands in
+94.9-95.4 %, the trivial-solution basin.
+
+Two diagnostics pin the mechanism:
+
+* The collapsed runs ran LONGER than the controls (568-1004 vs 283-358 epochs) --
+  each refit resets the patience counter, so they persist while degrading.
+* `3upd@0.25` fires at epochs 0, 250, 500.  It survived the epoch-0 refit and ran
+  normally, then stopped at **300 -- exactly one patience window after the refit
+  at 250**.  The epoch-0 update is harmless; the mid-training refit is fatal.
+
+Each refit discards the L-BFGS curvature estimate.  This configuration converges
+in ~300 epochs and L-BFGS needs on the order of 100 to build a useful
+approximation, so **no refit interval is simultaneously rare enough to preserve
+the history and frequent enough to matter.**
+
+The 12x resolution headroom is real but unreachable under quasi-Newton
+optimisation.  `charcoords50` at 0.1115 is the practical ceiling.
+
+The control arm doubles as a correctness check: two of three seeds reproduced the
+published values **bit-for-bit** (0.1140/320ep and 0.1116/283ep).  The third
+differed only because its published value came from the 800-epoch screen rather
+than the 3000-epoch budget used here.
+
+## 19. Conclusion
 
 For the **1D elastic wave equation in strong form**, with a solution that is a
-high-frequency travelling pulse (k_peak ≈ 9.4), a Fourier-featured PINN
-outperforms B-spline KANs by **1.7–2.0×** across homogeneous, two-layer and
-six-layer materials.
+high-frequency travelling pulse (k_peak ~ 9.4):
 
-**The mechanism is the input representation, not the network family.** Random
-Fourier features turn translation into a phase shift, which is *linear* in feature
-space: the embedding hands the PINN a flat, **67-effective-dimension** basis before
-any weight acts, and its tanh layers then barely bend (**1.3 %** of units past
-|z|>1). It succeeds by doing near-linear regression in a basis tuned to the
-problem's measured band.
+**A properly-tuned B-spline KAN matches the best PINN on two of three materials**
+-- homogeneous 1.001x, multilayer 1.006x -- using **49,020 parameters against
+PirateNet's 199,811 and the Fourier PINN's 82,689**.  On the sharp two-layer
+interface (w = 0.02) the PINN retains a 1.41x lead.
 
-The KAN starts from 2 directions and must synthesise oscillation by composing
-univariate splines. Its edges *are* genuinely nonlinear (~30 % per edge — it is
-working, not idling), yet it reaches only **effective rank 4.72** and carries the
-lowest high-frequency content measured (0.076).
+**The mechanism is input representation, not network family.**  Random Fourier
+features turn translation into a phase shift, handing the PINN a flat,
+67-effective-dimension basis before any weight acts -- after which its tanh layers
+barely bend (1.3 % of units past |z|>1).  It succeeds by near-linear regression in
+a basis tuned to the problem.
 
-**Against a like-for-like opponent the KAN wins**: pykan **0.227 %** beats the plain
-MLP's **0.316 %** on identical raw inputs, with 8× fewer parameters. The PINN's
-advantage is the embedding — and **the KAN cannot be given that embedding**, failing
-in 5 of 5 attempts.
+**The KAN cannot be given that basis** -- 6 of 6 Fourier-embedded configurations
+collapse, across all three materials, both feature widths, and two independent
+implementations.  But it has **its own route to the same structure**:
+characteristic coordinates rotate `(x,t)` so that `u = F(xi) + G(eta)` becomes a
+sum of univariate functions, which is natively what a KAN represents.  Given that
+route plus the resolution to exploit it, it reaches parity.
 
-That is the defensible form of the claim. It is scoped to this problem class, names
-the mechanism, and survives the counter-examples — including our own reproduction of
-arXiv:2602.15068, where the same pykan code **beats** the PINN 0.1834 % vs 0.5891 %.
+Against a like-for-like opponent the KAN was never behind: **pykan (0.227 %) beats
+the plain MLP (0.316 %)** on identical raw inputs with 8x fewer parameters.
 
-## 18. Open questions
+This is scoped to this problem class and survives its counter-examples --
+including our own reproduction of arXiv:2602.15068, where the same pykan code
+**beats** the PINN 0.1834 % vs 0.5891 %.
 
-1. **`charcoords50` at 0.1089 % on homogeneous** — below every PINN, converged, but
-   **one seed**, and from the grid50+k5 family whose sibling swung 51×.
-   Confirmation running.
-2. **`update_grid` has never been used** in a production run (§10.4). The measured
-   grid overflow and resolution starvation are unremediated.
-3. **PirateNet's twolayer inversion** — best on two materials (0.111, 0.167), worst
-   of all five on twolayer (2.768), a 25× degradation. Unexplained.
-4. **Representation vs optimisation** remains formally unresolved; the capacity
-   probe cannot settle it (§13.4) and the forensics answer it only by evidence.
-5. **Tier-5 KAN families** — Chebyshev, Jacobi, RBF/FastKAN, FourierKAN — untested.
-6. **A proper SIREN rung** (ω₀ ≈ 10–30 with SIREN initialisation) — untested.
+## 20. What was not done, and why
+
+| item | status | reason |
+|---|---|---|
+| capacity / ceiling probe | **abandoned** | four designs, all failed; it can prove "optimisation headroom exists" but never "representation-limited", which is the direction needed (13.4) |
+| `update_grid` | **tested, fails** | 8/8 collapse; destroys the L-BFGS curvature (section 18) |
+| Tier-5 KAN families (Chebyshev, Jacobi, RBF, FourierKAN) | not built | they target a representational deficit the winner no longer has: hi-k 0.262 already exceeds the Fourier PINN's 0.191.  Chebyshev/Jacobi are global bases -- the wrong direction for a localised pulse |
+| proper SIREN (omega_0 ~ 30) | not built | same mechanism, already solved; and `sin` at omega_0=1 tied silu exactly, indicating the base branch is not where the work happens |
+| first-order velocity-stress form | not built | a different experiment, not comparable to the 169 runs here; and its target (C0 `u_xx`) is already addressed by k=5, which is in the winner |
+
+## 21. Open questions
+
+1. **twolayer rests on single seeds.**  Its two best KAN numbers -- `tanh` 0.5563
+   (capped) and `charcoords50` 1.6642 -- are one seed each.  It is also the only
+   material where the PINN still wins, so its verdict has the weakest support in
+   the study.
+2. **PirateNet's twolayer inversion** -- best on two materials (0.111, 0.167),
+   worst of all five on twolayer (2.768), a 25x degradation.  Unexplained, and it
+   affects a different architecture family than the KAN failure on the same
+   material, so something about w = 0.02 is hostile in general.
+3. **Representation vs optimisation** remains formally unresolved.  The capacity
+   probe cannot settle it; the forensics answer it by evidence rather than proof.
+4. **Why sharpness and not interface count.**  `charcoords50` ties on multilayer
+   (5 interfaces, w = 0.05) and fails on twolayer (1 interface, w = 0.02).  The
+   sharpness hypothesis fits, but no experiment isolates it.
