@@ -565,7 +565,8 @@ if not all(torch.isfinite(q).all() for q in model.parameters()):
 Best-so-far weights are then restored, so a blow-up degrades to a reported number
 (100.797 %, epoch 12) rather than a NaN that silently poisons the metrics.
 
-**R3 adaptive resampling rescues WavKAN from trivial collapse 5 times out of 5**
+**One-shot residual resampling (labelled "R3" in Phases 6-9; see §12.3 for why
+that label was wrong) rescues WavKAN from trivial collapse 5 times out of 5**
 (e.g. homogeneous s1: 95.51 % → 5.20 %; multilayer s0: 97.53 % → 1.42 %), but does
 **not** rescue this divergence case.
 
@@ -842,8 +843,22 @@ one-sided guard was silent on the frozen-IC failure mode.
 
 L-BFGS, `max_iter=20`, `history_size=100`, strong-Wolfe line search, on a **fixed**
 Sobol collocation set of 10,000 points; **unnormalised** residual; patience-50 early
-stopping; best-loss weights restored. R3 adaptive resampling fires on patience
-exhaustion (retain above-mean residual, resample the rest, fresh optimiser).
+stopping; best-loss weights restored.
+
+Phases 6-9 also carry an arm labelled "R3". **That label was wrong** and is
+corrected here. What those runs actually do is fire **once**, on patience
+exhaustion: retain the above-mean-residual points, resample the rest, restart the
+optimiser. Call it *one-shot residual resampling*. The published R3 of Daw et al.
+(ICML 2023) resamples on **every iteration** -- verified against the official
+release, `arkadaw9/r3_sampling_icml2023`, where `sampler.update()` is called from
+inside `def loss()`. The same repository contains **no L-BFGS anywhere**
+(`grep -rn "LBFGS|lbfgs"` returns nothing); every configuration uses Adam. The
+two are not casually combinable: L-BFGS's curvature estimate assumes one fixed
+objective, and resampling every step invalidates it. So every "R3" result in
+Phases 6-9 should be read as one-shot resampling, not as the published
+algorithm. The faithful implementation lives in `core/hybrid.py::R3Pool` and is
+evaluated in Phase 10 (§22), where it runs during an Adam phase -- as the paper
+does -- and the subsequent L-BFGS phase freezes the pool it converged to.
 
 Three seeds per cell. Phases 6 and 7 total **124 training runs**.
 
@@ -990,6 +1005,7 @@ Recorded because each was asserted before it was checked.
 | "k=5 collapses" | **wrong** | 0.1590 % on homogeneous; material-dependent |
 | "characteristic coordinates didn't pay off" | **wrong** | `charcoords50` reached 0.1089 % |
 | "tanh beats silu 1.9× on multilayer" | **wrong** | evaporated at 3 seeds |
+| "the R3 arm implements Daw et al. (ICML 2023)" | **wrong** | it fires once on patience exhaustion; the published algorithm resamples every iteration, and never with L-BFGS (§12.3) |
 
 The recurring failure mode is **generalising from a single seed or a single
 material.** Three such findings collapsed within one hour of multi-seed checking.
