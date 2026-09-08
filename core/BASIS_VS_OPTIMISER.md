@@ -1,14 +1,43 @@
-# Why the KAN Beats the PINN, and What the nx=2048 Reference Changed
+# The KAN's Basis Advantage, and Why It Does Not Produce a Win
+
+> **Correction, written after this document.** The original title was *"Why the
+> KAN Beats the PINN"*, and the argument below was built on a **three-seed**
+> comparison in which the tuned KAN led by 1.42x. At **eleven seeds per arm** on
+> the homogeneous problem the lead is gone:
+>
+> | arm | rel-L2 @ nx=2048 (n=11) |
+> |---|---|
+> | Fourier PINN | **0.0281 % ± 0.0073** |
+> | `charcoords50` KAN | 0.0313 % ± 0.0170 |
+>
+> Welch **p = 0.577** on the means -- no detectable difference -- while the
+> KAN's *variance* is **5.44x** the PINN's (Levene p = 0.031, CI [1.46, 20.23]),
+> which is the only statistically significant difference between them. The
+> apparent 1.42x win was seed noise in a small sample, and this is the fourth
+> finding in this project to evaporate under multi-seed checking (§15 of
+> ARCHITECTURES.md).
+>
+> **What survives:** every *measurement* in Part 2 below. The solution really is
+> `F(ξ) + G(η)`; its energy really does concentrate on a measure-zero set in 2-D
+> frequency space; a separable spline basis really does fit it **233x** better
+> than 128 isotropic random Fourier features at matched dimension. Those are
+> checkable facts and they are unchanged.
+>
+> **What does not survive:** the inference from that basis advantage to a lower
+> final error. A 233x representational advantage produces **no measurable
+> accuracy gain**, which makes the interesting result the *gap* -- the KAN cannot
+> convert its basis advantage into accuracy, and the reason is the optimiser, not
+> the architecture. Read Part 2 as evidence for that, not as an explanation of a
+> win that was not there.
 
 Two separate questions, both answered by measurement rather than argument:
 
 1. **What did changing the reference from nx=512 to nx=2048 actually change?**
    Nothing about the models -- the reference never enters training. It changed
    what we could *see*, and by a precisely quantifiable factor.
-2. **Why does the tuned KAN beat the Fourier PINN on the homogeneous problem?**
-   Because the solution's energy lives on a measure-zero set in 2-D frequency
-   space, the KAN's basis sits exactly on that set by construction, and the
-   PINN's random features are isotropic and mostly miss it.
+2. **Does the tuned KAN's basis match the structure of this solution better than
+   the Fourier PINN's?** Yes, by a large and measurable margin -- which makes its
+   failure to win the thing that needs explaining.
 
 Everything below is reproducible from the checkpoints and `core/rescore.py`.
 
@@ -320,13 +349,18 @@ being measured. Because that error is common-mode and near-orthogonal to the
 model errors, measurement compressed all differences by a factor
 `E_2048/ref ≈ 0.19–0.27`, turning a genuine 1.42x gap into a displayed 1.018x.
 
-**Why the KAN wins:** the solution is exactly `F(ξ) + G(η)`; a KAN layer *is* a
-sum of univariate functions; and characteristic coordinates rotate the problem so
-those axes coincide. The KAN's basis therefore sits entirely on the measure-zero
-set where the solution's energy lives, while isotropic random Fourier features
-place only ~12 % of their capacity on the band holding 56 % of it. At matched
-dimension the separable basis is **233x** more accurate.
+**The KAN's basis really is better suited:** the solution is exactly
+`F(ξ) + G(η)`; a KAN layer *is* a sum of univariate functions; and characteristic
+coordinates rotate the problem so those axes coincide. The KAN's basis therefore
+sits entirely on the measure-zero set where the solution's energy lives, while
+isotropic random Fourier features place only ~12 % of their capacity on the band
+holding 56 % of it. At matched dimension the separable basis is **233x** more
+accurate.
 
-**Why the advantage is only 1.42x in practice:** the PINN's depth partially
-repairs its basis, and the KAN cannot reach the resolution its own basis would
-require -- a limit imposed by the optimiser, not the architecture.
+**And it buys nothing.** At n = 11 the two arms are indistinguishable in mean
+error (0.0281 % vs 0.0313 %, p = 0.577); the KAN's only significant difference is
+**5.44x the seed-to-seed variance**. A 233x representational advantage that
+produces a 1.0x accuracy result is strong evidence that final error here is set
+by the optimiser's ability to reach a good point, not by which functions the
+architecture can express. The PINN's depth partially repairs its basis; the KAN
+cannot reach the resolution its own basis would require.

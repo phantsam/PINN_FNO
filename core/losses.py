@@ -133,3 +133,16 @@ def grad_norm_weights(model, loss_a, loss_b, eps: float = 1e-12):
     a, b = mag(loss_a), mag(loss_b)
     ref = 0.5 * (a + b) + eps
     return ref / (a + eps), ref / (b + eps)
+
+def ic_loss(u_fn, x, sigma_g: float = 0.1):
+    """Soft initial condition: u(x,0)=g(x) and u_t(x,0)=0, as loss terms.
+
+    Only needed with ansatz kind='none'.  Both terms are returned summed and
+    unnormalised, matching the rest of the L-BFGS-path convention.
+    """
+    from .problem import gaussian_ic
+    t0 = torch.zeros_like(x).requires_grad_(True)
+    xx = x.clone().requires_grad_(True)
+    u = u_fn(xx, t0)
+    u_t = torch.autograd.grad(u, t0, torch.ones_like(u), create_graph=True)[0]
+    return ((u - gaussian_ic(xx, sigma_g)) ** 2).mean() + (u_t ** 2).mean()
