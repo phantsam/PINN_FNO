@@ -132,11 +132,30 @@ class PirateNet(nn.Module):
 
 # ─────────────────────────────── KANs ────────────────────────────────
 class _SplineKANLayer(nn.Module):
-    def __init__(self, i, o, grid_size=10, order=4):
+    """B-spline KAN layer.
+
+    `spline_scale` damps the spline branch at init.  It exists because plain
+    Xavier leaves this layer catastrophically ill-conditioned when it sits on a
+    Fourier embedding: u_tt picks up (embed')^2 ~ (2*pi*k)^2 ~ 3.5e4 from the
+    chain rule times spline'' ~ (1/knot spacing)^2 ~ 25, giving max|u_tt| =
+    1.16e6 against the Fourier PINN's 1.19e3 -- and a PDE loss of 3.5e10 with
+    gradients of 4.4e10 at step zero.
+
+    pykan avoids this with scale_sp = 1/sqrt(fan_in) (KANLayer.py:112).  Setting
+    spline_scale="fan" applies the same damping and drops max|u_tt| to 3.4e3.
+    Default None reproduces the shipped behaviour exactly, so every result
+    already on record stays reproducible.
+    """
+
+    def __init__(self, i, o, grid_size=10, order=4, spline_scale=None):
         super().__init__()
         self.n_basis = grid_size + order; self.order = order
         self.base = nn.Parameter(torch.empty(o, i)); nn.init.kaiming_uniform_(self.base, a=math.sqrt(5))
         self.coef = nn.Parameter(torch.empty(o, i, self.n_basis)); nn.init.xavier_uniform_(self.coef)
+        if spline_scale is not None:
+            f = (1.0 / math.sqrt(i * self.n_basis)) if spline_scale == "fan" else float(spline_scale)
+            with torch.no_grad():
+                self.coef.mul_(f)
         g = torch.linspace(-1, 1, grid_size + 1); step = g[1] - g[0]
         self.register_buffer("grid", torch.cat([
             torch.linspace(g[0] - order * step, g[0] - step, order), g,
@@ -158,12 +177,13 @@ class SplineKAN(nn.Module):
     """B-spline KAN on the shared Fourier embedding (the canonical 'PIKAN')."""
 
     def __init__(self, layers: int = 3, units: int = 64, grid_size: int = 10,
-                 n_fourier: int = 64, sigma: float = SIGMA_B):
+                 n_fourier: int = 64, sigma: float = SIGMA_B, spline_scale=None):
         super().__init__()
         self.embed = FourierEmbed(n_fourier, sigma)
-        self.l0 = _SplineKANLayer(self.embed.out_dim, units, grid_size)
+        self.l0 = _SplineKANLayer(self.embed.out_dim, units, grid_size, spline_scale=spline_scale)
         self.n0 = nn.LayerNorm(units)
-        self.mid = nn.ModuleList([_SplineKANLayer(units, units, grid_size) for _ in range(layers - 1)])
+        self.mid = nn.ModuleList([_SplineKANLayer(units, units, grid_size, spline_scale=spline_scale)
+                                  for _ in range(layers - 1)])
         self.norms = nn.ModuleList([nn.LayerNorm(units) for _ in range(layers - 1)])
         self.out = nn.Linear(units, 1, bias=False); nn.init.xavier_uniform_(self.out.weight)
 
@@ -258,8 +278,19 @@ class WavKAN(nn.Module):
 REGISTRY = {
     "mlp":        lambda: MLP(5, 128),
     "fourier":    lambda: FourierMLP(5, 128, 64, SIGMA_B),
+    # Parameter-MATCHED control.  The unified PINN/KAN benchmark (arXiv:2602.15068)
+    # configures every architecture to "approximately the same number of trainable
+    # parameters to control for model capacity".  charcoords50 has 49,020; this has
+    # 49,729 (+1.45 %).  The headline comparison uses the 128-wide PINN, which has
+    # 82,689 -- i.e. the KAN already wins with 40 % FEWER parameters -- so this
+    # control can only strengthen the result, never manufacture it.
+    "fourier_matched": lambda: FourierMLP(5, 96, 64, SIGMA_B),
     "pirate":     lambda: PirateNet(3, 128, 64, SIGMA_B),
     "splinekan":  lambda: SplineKAN(3, 64, 10, 64, SIGMA_B),   # hand-rolled; see CORRECTIONS C7b
+    # same architecture with pykan's 1/sqrt(fan_in) spline damping: max|u_tt|
+    # 1.16e6 -> 3.4e3.  Kept separate so `splinekan` still reproduces the runs
+    # already on record.
+    "splinekan_fix": lambda: SplineKAN(3, 64, 10, 64, SIGMA_B, spline_scale="fan"),
     "pykan":      lambda: PyKAN((2, 5, 5, 5, 1), 5, 3),        # reference implementation
     "pykan_wide": lambda: PyKAN((2, 20, 20, 20, 1), 5, 3),
     "wavkan":     lambda: WavKAN(7, 32),

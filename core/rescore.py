@@ -63,12 +63,20 @@ def fine_reference(material, nx, sigma_g=0.1, T=1.0):
     return x, np.stack(out)
 
 
-def score(model, material, x_ref, u_ref, device, sigma_g=0.1):
+def score(model, material, x_ref, u_ref, device, sigma_g=0.1, ansatz_kind="legacy"):
+    """Score a trained model against the reference.
+
+    `ansatz_kind` MUST match what the model was trained with.  It was hardcoded
+    to "legacy" here, which silently corrupted every soft-IC run: those networks
+    ARE u, so wrapping them in the hard ansatz scores g*decay + growth*u instead
+    of u.  The g*decay term does not depend on the model, so six different
+    architectures all scored 20.52-20.53 % -- the tell that caught it.
+    """
     X = torch.tensor(x_ref, dtype=torch.float32, device=device).reshape(-1, 1)
     tt = torch.tensor(TARGETS, dtype=torch.float32, device=device)
     xg = X.repeat(len(TARGETS), 1)
     tg = tt.repeat_interleave(len(x_ref)).reshape(-1, 1)
-    ans = make_ansatz("legacy", sigma_g=sigma_g)
+    ans = make_ansatz(ansatz_kind, sigma_g=sigma_g)
     with torch.no_grad():
         pred = ans(model(xg, tg), xg, tg).reshape(len(TARGETS), -1).cpu().numpy()
     return float(spacetime_rel_l2(pred, u_ref))
@@ -81,6 +89,8 @@ def main():
     ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--pinns", default="pirate,fourier")
     ap.add_argument("--rung", default="charcoords50")
+    ap.add_argument("--r3", action="store_true",
+                    help="train the PINN arm with R3 resampling (the best twolayer\n                          PINN is fourier+R3, so a like-for-like comparison there\n                          needs it)")
     ap.add_argument("--epochs", type=int, default=3000)
     ap.add_argument("--ckpt-dirs", nargs="+", required=True)
     ap.add_argument("--gpu", type=int, default=0)
@@ -90,6 +100,7 @@ def main():
     seeds = [int(s) for s in A.seeds.split(",")]
     rows = json.load(open(A.out)) if os.path.exists(A.out) else []
     done = {(r["material"], r["seed"], r["model"]) for r in rows}
+    sfx = "+R3" if A.r3 else ""
 
     print(f"re-scoring against nx={A.nx} (times matched exactly)\n")
     print(f"{'material':<13}{'model':<14}{'seed':>5}{'rel-L2 @2048':>14}", flush=True)
@@ -100,44 +111,57 @@ def main():
         # PINN arm: pure re-evaluation, weights untouched
         for arch in A.pinns.split(","):
             for sd in seeds:
-                if (mk, sd, arch) in done:
+                if (mk, sd, arch + sfx) in done:
                     continue
                 ck = None
+                tag = "r3" if A.r3 else "plain"
                 for d in A.ckpt_dirs:
-                    p = os.path.join(d, f"{mk}_s{sd}_{arch}_plain.pt")
+                    p = os.path.join(d, f"{mk}_s{sd}_{arch}_{tag}.pt")
                     if os.path.exists(p):
                         ck = p
                 if ck is None:
-                    print(f"{mk:<13}{arch:<14}{sd:>5}   no checkpoint"); continue
-                torch.manual_seed(0)
-                m = REGISTRY[arch]().to(dev)
-                sdict = torch.load(ck, map_location=dev, weights_only=False)
-                m.load_state_dict(sdict["state_dict"]); m.eval()
+                    # no checkpoint for this seed -> train it (Phases 6/7 only
+                    # covered seeds 0-2; the power analysis needs n=11 per arm)
+                    xc, tc, uc = fd_reference(M, nx=512, T=1.0, sigma_g=0.1)
+                    evi = [int(np.argmin(np.abs(tc - v))) for v in TARGETS]
+                    m, mm = train_lbfgs(REGISTRY[arch], M, epochs=A.epochs, seed=sd,
+                                        device=dev, use_r3=A.r3,
+                                        x_ref=xc, t_ref=tc[evi], u_ref=uc[evi])
+                    old = mm["rel_l2"]
+                else:
+                    torch.manual_seed(0)
+                    m = REGISTRY[arch]().to(dev)
+                    sdict = torch.load(ck, map_location=dev, weights_only=False)
+                    m.load_state_dict(sdict["state_dict"]); m.eval()
+                    old = sdict["metrics"]["rel_l2"]
                 v = score(m, M, xr, ur, dev)
-                rows.append(dict(material=mk, seed=sd, model=arch, rel_l2=v,
-                                 nx=A.nx, params=n_params(m),
-                                 old_rel_l2=sdict["metrics"]["rel_l2"]))
-                print(f"{mk:<13}{arch:<14}{sd:>5}{v:>13.4f}%   (was "
-                      f"{sdict['metrics']['rel_l2']:.4f} @512)", flush=True)
+                rows.append(dict(material=mk, seed=sd, model=arch + ("+R3" if A.r3 else ""),
+                                 rel_l2=v, nx=A.nx, params=n_params(m), old_rel_l2=old))
+                pname = arch + ("+R3" if A.r3 else "")
+                print(f"{mk:<13}{pname:<14}{sd:>5}{v:>13.4f}%   (was "
+                      f"{old:.4f} @512)", flush=True)
                 json.dump(rows, open(A.out, "w"), indent=1)
                 del m; torch.cuda.empty_cache()
 
         # KAN arm: retrain (Phase 8 saved no checkpoints), then score
         for sd in seeds:
-            if (mk, sd, A.rung) in done:
+            if (mk, sd, A.rung + sfx) in done:
                 continue
             model = build(A.rung, M, seed=sd + 1).to(dev)
             model.set_save_act(False)
             xc, tc, uc = fd_reference(M, nx=512, T=1.0, sigma_g=0.1)
             ev = [int(np.argmin(np.abs(tc - v))) for v in TARGETS]
+            # --r3 applies to BOTH arms, so each invocation is one cell of the
+            # 2x2 factorial (architecture x resampling) rather than a mixture.
             model, mm = train_lbfgs(lambda: model, M, epochs=A.epochs, seed=sd,
-                                    device=dev, use_r3=False,
+                                    device=dev, use_r3=A.r3,
                                     x_ref=xc, t_ref=tc[ev], u_ref=uc[ev])
             v = score(model, M, xr, ur, dev)
-            rows.append(dict(material=mk, seed=sd, model=A.rung, rel_l2=v,
+            kname = A.rung + ("+R3" if A.r3 else "")
+            rows.append(dict(material=mk, seed=sd, model=kname, rel_l2=v,
                              nx=A.nx, params=n_params(model),
                              old_rel_l2=mm["rel_l2"]))
-            print(f"{mk:<13}{A.rung:<14}{sd:>5}{v:>13.4f}%   (was "
+            print(f"{mk:<13}{kname:<14}{sd:>5}{v:>13.4f}%   (was "
                   f"{mm['rel_l2']:.4f} @512)", flush=True)
             json.dump(rows, open(A.out, "w"), indent=1)
             del model; torch.cuda.empty_cache()
